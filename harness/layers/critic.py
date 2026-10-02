@@ -79,16 +79,60 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        new_claims = []
+        for claim in claims:
+            if not isinstance(claim, dict) or "text" not in claim:
+                continue
+            text = claim.get("text", "")
+            if not text:
+                continue
+
+            if ctx.saw(text):
+                new_claims.append(claim)
+            else:
+                # Thử tách câu ghép hai nguồn mâu thuẫn (trường hợp (c))
+                split_found = False
+                sep = " và "
+                start = 0
+                while True:
+                    idx = text.find(sep, start)
+                    if idx == -1:
+                        break
+                    head = text[:idx]
+                    tail = text[idx + len(sep):]
+                    if head and tail and ctx.saw(head) and ctx.saw(tail):
+                        doc_head = None
+                        doc_tail = None
+                        if ctx.corpus and hasattr(ctx.corpus, "docs"):
+                            for doc in ctx.corpus.docs:
+                                if doc.body in ctx.observed_text:
+                                    if doc_head is None and any(head in line for line in doc.body.splitlines()):
+                                        doc_head = doc
+                                    if doc_tail is None and any(tail in line for line in doc.body.splitlines()):
+                                        doc_tail = doc
+                        if doc_head and doc_tail and doc_head.doc_id != doc_tail.doc_id:
+                            new_claims.append({"doc_id": doc_head.doc_id, "text": head})
+                            new_claims.append({"doc_id": doc_tail.doc_id, "text": tail})
+                            report["abstain"] = True
+                            split_found = True
+                            break
+                    start = idx + 1
+
+                if not split_found:
+                    # Bịa đặt (không có trong quan sát) -> bỏ claim
+                    pass
+
+        if not new_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Tài liệu nội bộ không có đủ căn cứ để trả lời câu hỏi này."
+        else:
+            report["claims"] = new_claims
+            report["citations"] = sorted({c["doc_id"] for c in new_claims if c.get("doc_id")})
+
+        return report
